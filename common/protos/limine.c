@@ -36,6 +36,7 @@
 #define LIMINE_NO_POINTERS
 #include <protos/limine.h>
 #include <limine.h>
+#include <protos/limine_mp.h>
 
 enum executable_format {
     EXECUTABLE_FORMAT_ELF,
@@ -1629,6 +1630,46 @@ FEAT_START
     framebuffer_response->framebuffers = reported_addr(fb_list);
 
     framebuffer_request->response = reported_addr(framebuffer_response);
+FEAT_END
+
+    // MicroPerceptron framebuffer source feature
+FEAT_START
+    struct limine_mp_framebuffer_source_request *source_request =
+        get_request(source_request, LIMINE_MP_FRAMEBUFFER_SOURCE_REQUEST_ID);
+    if (source_request == NULL) {
+        break;
+    }
+
+    if (fbp == NULL || fbs_count == 0) {
+        break;
+    }
+
+    struct limine_mp_framebuffer_source *sources =
+        ext_mem_alloc_counted(fbs_count, sizeof(struct limine_mp_framebuffer_source));
+    struct limine_mp_framebuffer_pci_source *pci_sources =
+        ext_mem_alloc_counted(fbs_count, sizeof(struct limine_mp_framebuffer_pci_source));
+    uint64_t *source_list = ext_mem_alloc_counted(fbs_count, sizeof(uint64_t));
+
+    for (size_t i = 0; i < fbs_count; i++) {
+        if (fbs[i].source_type == FB_SOURCE_PCI) {
+            pci_sources[i].segment = fbs[i].pci_source.segment;
+            pci_sources[i].bus = fbs[i].pci_source.bus;
+            pci_sources[i].device = fbs[i].pci_source.device;
+            pci_sources[i].function = fbs[i].pci_source.function;
+
+            sources[i].type = LIMINE_MP_FRAMEBUFFER_SOURCE_PCI;
+            sources[i].data = reported_addr(&pci_sources[i]);
+        }
+
+        source_list[i] = reported_addr(&sources[i]);
+    }
+
+    struct limine_mp_framebuffer_source_response *source_response =
+        ext_mem_alloc(sizeof(struct limine_mp_framebuffer_source_response));
+    source_response->entry_count = fbs_count;
+    source_response->entries = reported_addr(source_list);
+
+    source_request->response = reported_addr(source_response);
 FEAT_END
 
     // Flanterm FB init params feature

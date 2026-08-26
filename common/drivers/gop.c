@@ -131,6 +131,53 @@ out:
 
 bool gop_force_16 = false;
 
+static void get_framebuffer_source(struct fb_info *fb, EFI_HANDLE gop_handle) {
+    EFI_GUID device_path_guid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+    EFI_DEVICE_PATH *device_path = NULL;
+
+    EFI_STATUS status = gBS->HandleProtocol(gop_handle, &device_path_guid,
+                                            (void **)&device_path);
+    if (status != EFI_SUCCESS) {
+        return;
+    }
+
+    EFI_GUID pci_io_guid = EFI_PCI_IO_PROTOCOL_GUID;
+    EFI_HANDLE pci_handle = NULL;
+    status = gBS->LocateDevicePath(&pci_io_guid, &device_path, &pci_handle);
+    if (status != EFI_SUCCESS) {
+        return;
+    }
+
+    EFI_PCI_IO_PROTOCOL *pci_io = NULL;
+    status = gBS->HandleProtocol(pci_handle, &pci_io_guid, (void **)&pci_io);
+    if (status != EFI_SUCCESS) {
+        return;
+    }
+
+    UINTN segment;
+    UINTN bus;
+    UINTN device;
+    UINTN function;
+    status = pci_io->GetLocation(pci_io, &segment, &bus, &device, &function);
+    if (status != EFI_SUCCESS
+     || segment > UINT16_MAX
+     || bus > UINT8_MAX
+     || device > 31
+     || function > 7) {
+        return;
+    }
+
+    fb->source_type = FB_SOURCE_PCI;
+    fb->pci_source.segment = segment;
+    fb->pci_source.bus = bus;
+    fb->pci_source.device = device;
+    fb->pci_source.function = function;
+
+    printv("gop: Framebuffer source PCI %x:%x:%x.%x\n",
+           (uint32_t)segment, (uint32_t)bus, (uint32_t)device,
+           (uint32_t)function);
+}
+
 static bool try_mode(struct fb_info *ret, EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
                      size_t mode, uint64_t width, uint64_t height, int bpp,
                      struct fb_info *fbs, size_t fbs_count) {
@@ -382,6 +429,7 @@ success:;
         size_t mode_count;
         fb->mode_list = get_mode_list(&mode_count, gop);
         fb->mode_count = mode_count;
+        get_framebuffer_source(fb, handles[i]);
 
         fbs_count++;
     }

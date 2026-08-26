@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <limine.h>
+#include "../common/protos/limine_mp.h"
 #include <e9print.h>
 #include <flanterm.h>
 #include <flanterm_backends/fb.h>
@@ -215,6 +216,12 @@ static volatile struct limine_bootloader_performance_request _perf_request = {
 __attribute__((section(".limine_requests")))
 static volatile struct limine_flanterm_fb_init_params_request fip_request = {
     .id = LIMINE_FLANTERM_FB_INIT_PARAMS_REQUEST_ID,
+    .revision = 0, .response = NULL,
+};
+
+__attribute__((section(".limine_requests")))
+static volatile struct limine_mp_framebuffer_source_request source_request = {
+    .id = LIMINE_MP_FRAMEBUFFER_SOURCE_REQUEST_ID,
     .revision = 0, .response = NULL,
 };
 
@@ -501,6 +508,37 @@ FEAT_START
         printf("Video modes:\n");
         for (size_t j = 0; j < fb->mode_count; j++) {
             printf("  %lux%lux%lu\n", (unsigned long)fb->modes[j]->width, (unsigned long)fb->modes[j]->height, (unsigned long)fb->modes[j]->bpp);
+        }
+    }
+FEAT_END
+
+FEAT_START
+    printf("\n");
+    if (source_request.response == NULL) {
+        printf("Framebuffer sources not passed\n");
+        break;
+    }
+    struct limine_mp_framebuffer_source_response *source_response =
+        source_request.response;
+    printf("Framebuffer sources feature, revision %lu\n",
+           source_response->revision);
+    printf("%lu source(s)\n", source_response->entry_count);
+    if (source_response->entry_count
+     != framebuffer_request.response->framebuffer_count) {
+        printf("Framebuffer source count mismatch\n");
+        break;
+    }
+    for (size_t i = 0; i < source_response->entry_count; i++) {
+        struct limine_mp_framebuffer_source *source = source_response->entries[i];
+        if (source->type == LIMINE_MP_FRAMEBUFFER_SOURCE_UNKNOWN) {
+            printf("Source %lu: unknown\n", i);
+        } else if (source->type == LIMINE_MP_FRAMEBUFFER_SOURCE_PCI
+                && source->data != NULL) {
+            struct limine_mp_framebuffer_pci_source *pci = source->data;
+            printf("Source %lu: PCI %lx:%lx:%lx.%lx\n", i, pci->segment,
+                   pci->bus, pci->device, pci->function);
+        } else {
+            printf("Source %lu: invalid type %lu\n", i, source->type);
         }
     }
 FEAT_END
