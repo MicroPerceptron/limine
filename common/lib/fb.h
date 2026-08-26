@@ -12,6 +12,16 @@ struct resolution {
     uint16_t bpp;
 };
 
+#define FB_SOURCE_NONE 0
+#define FB_SOURCE_PCI 1
+
+struct fb_pci_source {
+    uint16_t segment;
+    uint8_t bus;
+    uint8_t device;
+    uint8_t function;
+};
+
 struct fb_info {
     uint64_t framebuffer_pitch;
     uint64_t framebuffer_width;
@@ -31,6 +41,9 @@ struct fb_info {
 
     uint64_t mode_count;
     struct fb_info *mode_list;
+
+    uint8_t source_type;
+    struct fb_pci_source pci_source;
 };
 
 extern struct fb_info *fb_fbs;
