@@ -51,7 +51,10 @@ For `LIMINE_MP_FRAMEBUFFER_SOURCE_UNKNOWN`, `data` is `NULL`. For
 segment-group numbering. Values outside the PCI ranges are never reported as a
 PCI source.
 
-UEFI GOP handles are resolved through their device paths to the closest handle
-supporting `EFI_PCI_IO_PROTOCOL`, whose `GetLocation()` method provides the PCI
-coordinates. Resolution failure, a non-PCI provider, and BIOS VBE all produce
-an unknown source rather than an inferred identity.
+UEFI GOP handles are first resolved through their device paths to the closest
+handle supporting `EFI_PCI_IO_PROTOCOL`. If firmware installs GOP on a child
+whose device path cannot be resolved to PCI I/O, the loader accepts only an
+explicit `EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER` relationship naming that GOP
+handle. The selected PCI I/O protocol's `GetLocation()` method provides the PCI
+coordinates. Failure of both positive relationships, a non-PCI provider, and
+BIOS VBE all produce an unknown source rather than an inferred identity.
