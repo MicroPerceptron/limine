@@ -1649,6 +1649,7 @@ FEAT_START
     struct limine_mp_framebuffer_pci_source *pci_sources =
         ext_mem_alloc_counted(fbs_count, sizeof(struct limine_mp_framebuffer_pci_source));
     uint64_t *source_list = ext_mem_alloc_counted(fbs_count, sizeof(uint64_t));
+    uint64_t *probe_masks = ext_mem_alloc_counted(fbs_count, sizeof(uint64_t));
 
     for (size_t i = 0; i < fbs_count; i++) {
         if (fbs[i].source_type == FB_SOURCE_PCI) {
@@ -1662,12 +1663,15 @@ FEAT_START
         }
 
         source_list[i] = reported_addr(&sources[i]);
+        probe_masks[i] = fbs[i].source_probe;
     }
 
     struct limine_mp_framebuffer_source_response *source_response =
         ext_mem_alloc(sizeof(struct limine_mp_framebuffer_source_response));
+    source_response->revision = 1;
     source_response->entry_count = fbs_count;
     source_response->entries = reported_addr(source_list);
+    source_response->probe_masks = reported_addr(probe_masks);
 
     source_request->response = reported_addr(source_response);
 FEAT_END

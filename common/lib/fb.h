@@ -15,6 +15,26 @@ struct resolution {
 #define FB_SOURCE_NONE 0
 #define FB_SOURCE_PCI 1
 
+// Source-probe outcome bits, recorded per framebuffer while the source
+// proofs run.  Wire vocabulary: values must match the
+// LIMINE_MP_FRAMEBUFFER_PROBE_* constants in protos/limine_mp.h and the
+// revision-1 contract in EXTENSIONS.md.
+#define FB_PROBE_DP_PRESENT     (1 << 0)  // GOP handle carries a device path
+#define FB_PROBE_DP_PCI_PREFIX  (1 << 1)  // that path has an EFI_PCI_IO prefix
+#define FB_PROBE_DP_LOCATED     (1 << 2)  // prefix handle yielded PCI coordinates
+#define FB_PROBE_CHILD_SCAN     (1 << 3)  // child-controller relation scan ran
+#define FB_PROBE_CHILD_RELATION (1 << 4)  // a PCI parent names this GOP handle
+#define FB_PROBE_CONSOLE_HANDLE (1 << 5)  // GOP handle == gST->ConsoleOutHandle
+#define FB_PROBE_CONOUT_VAR     (1 << 6)  // ConOut variable read and walked
+#define FB_PROBE_CONOUT_PCI     (1 << 7)  // >=1 ConOut instance reached PCI I/O
+#define FB_PROBE_CONOUT_UNIQUE  (1 << 8)  // every resolved instance agrees on one BDF
+#define FB_PROBE_SOURCE_PCI     (1 << 9)  // final verdict: source_type == PCI
+
+// [23:16] GOP handle count seen by init_gop, [31:24] this framebuffer's
+// handle index, both saturating at 0xff.
+#define FB_PROBE_HANDLES_SHIFT 16
+#define FB_PROBE_INDEX_SHIFT 24
+
 struct fb_pci_source {
     uint16_t segment;
     uint8_t bus;
@@ -44,6 +64,7 @@ struct fb_info {
 
     uint8_t source_type;
     struct fb_pci_source pci_source;
+    uint32_t source_probe;
 };
 
 extern struct fb_info *fb_fbs;
