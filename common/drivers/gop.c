@@ -131,8 +131,11 @@ out:
 
 bool gop_force_16 = false;
 
-static bool set_pci_framebuffer_source(struct fb_info *fb,
-                                       EFI_HANDLE pci_handle) {
+// Resolve one EFI_PCI_IO handle to bounded PCI coordinates.  The bounds keep
+// every reported source inside PCI numbering; a firmware answer outside them
+// is treated as no answer at all.
+static bool pci_handle_location(EFI_HANDLE pci_handle,
+                                struct fb_pci_source *out) {
     EFI_GUID pci_io_guid = EFI_PCI_IO_PROTOCOL_GUID;
     EFI_PCI_IO_PROTOCOL *pci_io = NULL;
     EFI_STATUS status = gBS->HandleProtocol(pci_handle, &pci_io_guid,
@@ -154,15 +157,26 @@ static bool set_pci_framebuffer_source(struct fb_info *fb,
         return false;
     }
 
+    out->segment = segment;
+    out->bus = bus;
+    out->device = device;
+    out->function = function;
+    return true;
+}
+
+static bool set_pci_framebuffer_source(struct fb_info *fb,
+                                       EFI_HANDLE pci_handle) {
+    struct fb_pci_source source;
+    if (!pci_handle_location(pci_handle, &source)) {
+        return false;
+    }
+
     fb->source_type = FB_SOURCE_PCI;
-    fb->pci_source.segment = segment;
-    fb->pci_source.bus = bus;
-    fb->pci_source.device = device;
-    fb->pci_source.function = function;
+    fb->pci_source = source;
 
     printv("gop: Framebuffer source PCI %x:%x:%x.%x\n",
-           (uint32_t)segment, (uint32_t)bus, (uint32_t)device,
-           (uint32_t)function);
+           (uint32_t)source.segment, (uint32_t)source.bus,
+           (uint32_t)source.device, (uint32_t)source.function);
     return true;
 }
 
@@ -176,12 +190,21 @@ static bool get_framebuffer_source_from_device_path(struct fb_info *fb,
     if (status != EFI_SUCCESS) {
         return false;
     }
+    fb->source_probe |= FB_PROBE_DP_PRESENT;
 
     EFI_GUID pci_io_guid = EFI_PCI_IO_PROTOCOL_GUID;
     EFI_HANDLE pci_handle = NULL;
     status = gBS->LocateDevicePath(&pci_io_guid, &device_path, &pci_handle);
-    return status == EFI_SUCCESS
-        && set_pci_framebuffer_source(fb, pci_handle);
+    if (status != EFI_SUCCESS) {
+        return false;
+    }
+    fb->source_probe |= FB_PROBE_DP_PCI_PREFIX;
+
+    if (!set_pci_framebuffer_source(fb, pci_handle)) {
+        return false;
+    }
+    fb->source_probe |= FB_PROBE_DP_LOCATED;
+    return true;
 }
 
 static bool pci_handle_owns_gop_child(EFI_HANDLE pci_handle,
@@ -209,17 +232,14 @@ static bool pci_handle_owns_gop_child(EFI_HANDLE pci_handle,
     return owns;
 }
 
-static void get_framebuffer_source(struct fb_info *fb, EFI_HANDLE gop_handle) {
-    if (get_framebuffer_source_from_device_path(fb, gop_handle)) {
-        return;
-    }
-
-    // Some firmware installs GOP on a child handle whose device path cannot be
-    // resolved back to EFI_PCI_IO_PROTOCOL. UEFI bus drivers still record the
-    // controller relationship by opening the parent PCI I/O protocol with
-    // EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER and the GOP handle as
-    // ControllerHandle. Walk only those explicit relationships: guessing from
-    // framebuffer addresses or display class would not prove boot ownership.
+// Some firmware installs GOP on a child handle whose device path cannot be
+// resolved back to EFI_PCI_IO_PROTOCOL. UEFI bus drivers still record the
+// controller relationship by opening the parent PCI I/O protocol with
+// EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER and the GOP handle as
+// ControllerHandle. Walk only those explicit relationships: guessing from
+// framebuffer addresses or display class would not prove boot ownership.
+static bool get_framebuffer_source_from_child_relation(struct fb_info *fb,
+                                                       EFI_HANDLE gop_handle) {
     EFI_GUID pci_io_guid = EFI_PCI_IO_PROTOCOL_GUID;
     EFI_HANDLE tmp_handles[1];
     EFI_HANDLE *handles = tmp_handles;
@@ -227,7 +247,7 @@ static void get_framebuffer_source(struct fb_info *fb, EFI_HANDLE gop_handle) {
     EFI_STATUS status = gBS->LocateHandle(ByProtocol, &pci_io_guid, NULL,
                                           &handles_size, handles);
     if (status != EFI_SUCCESS && status != EFI_BUFFER_TOO_SMALL) {
-        return;
+        return false;
     }
 
     UINTN handles_alloc = handles_size;
@@ -236,17 +256,151 @@ static void get_framebuffer_source(struct fb_info *fb, EFI_HANDLE gop_handle) {
                                &handles_size, handles);
     if (status != EFI_SUCCESS) {
         pmm_free(handles, handles_alloc);
-        return;
+        return false;
     }
+    fb->source_probe |= FB_PROBE_CHILD_SCAN;
 
+    bool found = false;
     size_t handles_count = handles_size / sizeof(EFI_HANDLE);
     for (size_t i = 0; i < handles_count; i++) {
-        if (pci_handle_owns_gop_child(handles[i], &pci_io_guid, gop_handle)
-         && set_pci_framebuffer_source(fb, handles[i])) {
-            break;
+        if (pci_handle_owns_gop_child(handles[i], &pci_io_guid, gop_handle)) {
+            fb->source_probe |= FB_PROBE_CHILD_RELATION;
+            if (set_pci_framebuffer_source(fb, handles[i])) {
+                found = true;
+                break;
+            }
         }
     }
     pmm_free(handles, handles_alloc);
+    return found;
+}
+
+// The console-splitter posture: firmware that virtualizes console output
+// installs GOP on an aggregate handle with no device path and no recorded
+// PCI parent, while the handle IS the system table's ConsoleOutHandle.  For
+// exactly that handle, firmware's own ConOut variable names the sink device
+// paths, and resolving those through EFI_PCI_IO is a firmware-asserted
+// binding, not a guess.  All resolved instances must agree on one function:
+// a console scanning out via two PCI devices proves ownership of neither.
+static bool get_framebuffer_source_from_conout(struct fb_info *fb,
+                                               EFI_HANDLE gop_handle) {
+    if (gST->ConsoleOutHandle == NULL
+     || gop_handle != gST->ConsoleOutHandle) {
+        return false;
+    }
+    fb->source_probe |= FB_PROBE_CONSOLE_HANDLE;
+
+    EFI_GUID global_variable = EFI_GLOBAL_VARIABLE;
+    UINTN size = 0;
+    EFI_STATUS status = gRT->GetVariable(L"ConOut", &global_variable, NULL,
+                                         &size, NULL);
+    if (status != EFI_BUFFER_TOO_SMALL || size < 4) {
+        return false;
+    }
+    uint8_t *paths = ext_mem_alloc(size);
+    UINTN paths_alloc = size;
+    status = gRT->GetVariable(L"ConOut", &global_variable, NULL, &size, paths);
+    if (status != EFI_SUCCESS || size != paths_alloc) {
+        pmm_free(paths, paths_alloc);
+        return false;
+    }
+
+    // Walk the multi-instance device path node by node.  Node lengths are
+    // read bytewise: instance boundaries do not keep the header alignment.
+    bool walked = false;
+    bool resolved = false;
+    bool conflict = false;
+    struct fb_pci_source agreed = {0};
+
+    UINTN at = 0;
+    UINTN instance_at = 0;
+    while (at + 4 <= size) {
+        uint8_t type = paths[at];
+        uint8_t subtype = paths[at + 1];
+        UINTN length = (UINTN)paths[at + 2] | ((UINTN)paths[at + 3] << 8);
+        if (length < 4 || length > size - at) {
+            break;
+        }
+        UINTN node_at = at;
+        at += length;
+        if (type != 0x7f) {
+            continue;
+        }
+        // 0x01 ends one instance, 0xff ends the whole list; anything else
+        // is malformation.  Resolve the instance that just closed.
+        //
+        // LocateDevicePath stops only at an end-of-ENTIRE-path node, so an
+        // instance closed by 0x01 would let it read into the next instance.
+        // The buffer is our own copy of the variable, so promote this end
+        // node for the call and put it back afterwards.
+        if (subtype == 0x01) {
+            paths[node_at + 1] = 0xff;
+        }
+        EFI_GUID pci_io_guid = EFI_PCI_IO_PROTOCOL_GUID;
+        EFI_DEVICE_PATH *remaining =
+            (EFI_DEVICE_PATH *)(paths + instance_at);
+        EFI_HANDLE pci_handle = NULL;
+        instance_at = at;
+        if (gBS->LocateDevicePath(&pci_io_guid, &remaining, &pci_handle)
+         == EFI_SUCCESS) {
+            struct fb_pci_source candidate;
+            if (pci_handle_location(pci_handle, &candidate)) {
+                if (!resolved) {
+                    resolved = true;
+                    agreed = candidate;
+                } else if (agreed.segment != candidate.segment
+                        || agreed.bus != candidate.bus
+                        || agreed.device != candidate.device
+                        || agreed.function != candidate.function) {
+                    conflict = true;
+                }
+            }
+        }
+        if (subtype == 0x01) {
+            paths[node_at + 1] = 0x01;
+            continue;
+        }
+        walked = subtype == 0xff && at == size;
+        break;
+    }
+    pmm_free(paths, paths_alloc);
+
+    if (!walked) {
+        return false;
+    }
+    fb->source_probe |= FB_PROBE_CONOUT_VAR;
+    if (!resolved) {
+        return false;
+    }
+    fb->source_probe |= FB_PROBE_CONOUT_PCI;
+    if (conflict) {
+        return false;
+    }
+    fb->source_probe |= FB_PROBE_CONOUT_UNIQUE;
+
+    fb->source_type = FB_SOURCE_PCI;
+    fb->pci_source = agreed;
+    printv("gop: Framebuffer source PCI %x:%x:%x.%x (ConOut console)\n",
+           (uint32_t)agreed.segment, (uint32_t)agreed.bus,
+           (uint32_t)agreed.device, (uint32_t)agreed.function);
+    return true;
+}
+
+static void get_framebuffer_source(struct fb_info *fb, EFI_HANDLE gop_handle,
+                                   size_t handles_count, size_t handle_index) {
+    if (!get_framebuffer_source_from_device_path(fb, gop_handle)
+     && !get_framebuffer_source_from_child_relation(fb, gop_handle)
+     && !get_framebuffer_source_from_conout(fb, gop_handle)) {
+        printv("gop: No positive framebuffer source (probe %x)\n",
+               fb->source_probe);
+    }
+    if (fb->source_type == FB_SOURCE_PCI) {
+        fb->source_probe |= FB_PROBE_SOURCE_PCI;
+    }
+    fb->source_probe |= (uint32_t)(handles_count > 0xff ? 0xff : handles_count)
+                        << FB_PROBE_HANDLES_SHIFT;
+    fb->source_probe |= (uint32_t)(handle_index > 0xff ? 0xff : handle_index)
+                        << FB_PROBE_INDEX_SHIFT;
 }
 
 static bool try_mode(struct fb_info *ret, EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
@@ -500,7 +654,7 @@ success:;
         size_t mode_count;
         fb->mode_list = get_mode_list(&mode_count, gop);
         fb->mode_count = mode_count;
-        get_framebuffer_source(fb, handles[i]);
+        get_framebuffer_source(fb, handles[i], handles_count, i);
 
         fbs_count++;
     }

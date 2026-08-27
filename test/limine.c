@@ -541,6 +541,22 @@ FEAT_START
             printf("Source %lu: invalid type %lu\n", i, source->type);
         }
     }
+    if (source_response->revision < 1) {
+        printf("No probe masks (revision 0)\n");
+        break;
+    }
+    if (source_response->probe_masks == NULL) {
+        printf("Revision 1 without probe masks\n");
+        break;
+    }
+    for (size_t i = 0; i < source_response->entry_count; i++) {
+        uint64_t probe = source_response->probe_masks[i];
+        struct limine_mp_framebuffer_source *source = source_response->entries[i];
+        bool source_pci = source->type == LIMINE_MP_FRAMEBUFFER_SOURCE_PCI;
+        bool probe_pci = (probe & LIMINE_MP_FRAMEBUFFER_PROBE_SOURCE_PCI) != 0;
+        printf("Probe %lu: %lx%s\n", i, probe,
+               source_pci == probe_pci ? "" : " (VERDICT MISMATCH)");
+    }
 FEAT_END
 
 FEAT_START
